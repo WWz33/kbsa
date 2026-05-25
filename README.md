@@ -1,6 +1,8 @@
 # kbsa — k-mer Bulked Segregant Analysis
 
-Reference-free k-mer-based BSA-seq tool. Identifies QTL intervals from pooled-sample sequencing without variant calling or read alignment.
+A tool for QTL interval detection from pooled-sample sequencing using direct k-mer frequency comparison. Two complementary modes: **anchor** (reference-projected, exact k-mer hash lookup) and **unitig** (reference-free, de novo assembly of differential k-mers).
+
+Skips read alignment and variant calling — works directly from KMC k-mer databases.
 
 ## Principle
 
@@ -41,31 +43,36 @@ kbsa unitig --bulk1 bulk1_sorted --bulk2 bulk2_sorted \
 
 ## Validation Results
 
-Tested on 5 datasets spanning different population designs, organisms, and causal variant types.
+Tested on 5 datasets spanning different population designs, organisms, and causal variant types. All results below are reproducible from the public KMC databases via `kbsa anchor --peak`.
 
 ### Anchor mode (`--peak`)
 
-| Dataset | Organism | Population | Causal Gene | Literature Interval | Top Hit | Rank | Notes |
-|---------|----------|-----------|-------------|--------------------:|--------:|:----:|-------|
-| brapa | *B. rapa* | F2 (25+25) | Bra032670 (PAV) | A09: 37.35-38.88 Mb | A09: 38Mb | #1 | PAV detected via one-sided k-mers |
-| cucumber | *C. sativus* | F2 (30+30) | CsaV3_1G044640 (102bp del) | chr1: ~30 Mb | chr1: 30Mb | #1 | |
-| cabbage | *B. oleracea* | BC24 | Bol035718 (1bp promoter del) | C09: 28-31 Mb | C09: 33Mb | #1 | Target interval C09:30Mb at rank #5; requires `--peak1 30 --peak2 30` (GS2) |
-| vradiata | *V. radiata* | RIL (30+30) | jg35124 (1bp exon del) | chr11: 6.23-12.75 Mb | chr11: 11Mb | #1 | Top 5 all within literature interval |
-| soybean | *G. max* | F2 (40+40) | Glyma.06G202300 (frameshift) | Gm06: 17.18-20.58 Mb | Gm06: 18Mb | #1 | |
+| Dataset | Causal Gene | Literature Interval | Top Hit (rank #1) | Target Interval Captured? | Top Rank Within Interval |
+|---------|-------------|--------------------:|-------------------|:--:|:--:|
+| brapa | Bra032670 (PAV) | A09: 37.35-38.88 Mb | A09: 38-39 Mb | yes | **#1** (38-39Mb in interval) |
+| cucumber | CsaV3_1G044640 (102bp del) | chr1: ~30 Mb (causal@30.06Mb) | chr1: 30-31 Mb | yes | **#1** |
+| cabbage | Bol035718 (1bp promoter del) | C09: 28-31 Mb | C09: **33-34 Mb** | yes (at rank #5) | **#5** (30-31Mb) |
+| vradiata | jg35124 (1bp exon del) | chr11: 6.23-12.75 Mb | chr11: 11-12 Mb | yes | **#1** through **#5** all in interval |
+| soybean | Glyma.06G202300 (frameshift) | Gm06: 17.18-20.58 Mb | Gm06: 19-20 Mb | yes | **#1** |
+
+**Honest read**: 4/5 datasets place a window inside the literature interval at rank #1. Cabbage is the exception — its top peak (C09:33-34Mb) falls ~2-3 Mb outside the literature interval; the literature interval is captured at rank #5. The 33-34Mb peak may reflect a real linked region or background noise; further investigation needed. Even with `--peak1 30 --peak2 30` (GenomeScope2-derived) the rank order does not improve.
 
 ### Unitig mode (`--map-ref`)
 
-| Dataset | Unitigs | Mapped | Target Chr % | Closest to Gene | Distance | Variant Found |
-|---------|--------:|-------:|:------------:|-----------------|----------|---------------|
-| cabbage | 351 | 108 | 89/108 on C09 (82%) | Bol035718@29.14Mb | 870kb downstream (30.01Mb) | 7 SNPs in intergenic region |
-| vradiata | 118 | 50 | 34/50 on chr11 (68%) | jg35124@21.27Mb | 887kb upstream (20.38Mb) | NM:i:0 (depth signal, not SNP) |
+| Dataset | Unitigs | Mapped | Target Chr % | Closest Unitig to Causal Gene | Distance | Sequence Variants Found |
+|---------|--------:|-------:|:------------:|--------------------------------|----------|--------------------------|
+| cabbage | 351 | 108 | 89/108 on C09 (82%) | Bol035718 @ C09:29.14Mb | 870 kb (closest unitig at 30.01Mb) | 7 SNPs in C09:30Mb intergenic region |
+| vradiata | 118 | 50 | 34/50 on chr11 (68%) | jg35124 @ chr11:21.27Mb | 887 kb (closest unitig at 20.38Mb) | All NM:i:0 — depth signal, no SNPs |
+
+**Honest read**: Unitig mode confirms that differential signal exists in the QTL region but does not directly cover the causal gene in either case. Both causal genes are <5kb single-base deletions; their flanking k-mers may not pass the differential filter, or the deletion-spanning unitigs assemble in the linked region rather than at the gene itself.
 
 ### Interpretation
 
-- **Anchor mode** reliably identifies the correct QTL interval at 1Mb resolution across all 5 datasets (5/5 top-ranked).
-- **Unitig mode** confirms anchor results at base-pair level but does not directly hit causal genes — unitigs cluster in linked intergenic regions ~1Mb from the causal locus.
-- **Cabbage high-het caveat**: Heuristic peak detection fails at het>5%. External GenomeScope2 pipeline (`scripts/kbsa-anchor-gs2.sh`) required for correct thresholds.
-- **Vradiata signal type**: Differential signal is depth-based (NM:i:0), not SNP-based — suggests structural/copy-number variation rather than point mutations at the unitig loci.
+- **Anchor mode strength**: Reliably places signal within the QTL interval at 1Mb resolution. Rank #1 for 4/5 datasets; rank #5 (still in interval) for cabbage.
+- **Anchor mode weakness**: Cannot guarantee rank #1 always falls inside the literature interval — surrounding linked regions can outscore the causal interval, especially in BC populations with extended LD (cabbage BC24).
+- **Unitig mode strength**: Confirms regional signal at base-pair resolution and detects PAV (brapa case).
+- **Unitig mode weakness**: Did not directly cover the causal gene in cabbage or vradiata — unitigs cluster ~1Mb from the causal locus. Single-base indels in promoter/exon may not produce detectable differential k-mer chains.
+- **Cabbage high-het caveat**: Heuristic peak detection fails at het>5%. External GenomeScope2 pipeline (`scripts/kbsa-anchor-gs2.sh`) corrects depth thresholds but does not change rank order.
 
 ## Advantages
 

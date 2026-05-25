@@ -1,0 +1,52 @@
+# Build
+build/
+cmake-build-*/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test binaries
+tests/test_unitig_cdbg
+tests/test_unitig_integration
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Backup files
+*.bak
+
+# Workflow / AI context
+.claude/
+.omc/
+.omx/
+.ccg/
+.codegraph/
+openspec/
+
+# Simulation output
+sim/output_*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# External runtime deps (not compiled, user installs separately)
+extern/bcalm/
+extern/bifrost/
+extern/genomescope2/
+
+# Results / data (not source)
+*.bed
+*.tsv
+*.fa
+*.fasta
+*.fastq
+*.fq
+*.gz
+*.kmc_pre
+*.kmc_suf

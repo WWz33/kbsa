@@ -12,7 +12,7 @@ Traditional BSA-seq requires: read alignment → variant calling → SNP-index c
 
 ### `kbsa anchor --peak` (primary)
 
-Projects k-mer scores onto reference genome positions via sliding window. Outputs ranked 1Mb intervals by excess-mass score.
+Projects k-mer scores onto reference genome positions via sliding window. Outputs ranked intervals by excess-mass score.
 
 ```bash
 kbsa anchor --ref genome.fa \
@@ -20,6 +20,10 @@ kbsa anchor --ref genome.fa \
   --bulk1-hist bulk1_hist.txt --bulk2-hist bulk2_hist.txt \
   --peak --threads 6 -o output.bed
 ```
+
+**Algorithm**: For each k-mer on the reference (sliding by 1bp), exact-lookup its count in both bulk KMC databases via minimizer-indexed hash query. Compute the BSA z-score, accumulate `max(0, |z| - tau)` into the window the position belongs to. Rank windows by sum.
+
+This is **not** alignment, mapping, or pseudo-alignment (Salmon/kallisto). The reference genome serves only as the source of probe k-mers; `KMC::CheckKmer` is an O(1) exact hash lookup. Consequence: anchor mode cannot find k-mers absent from the reference — that is what `unitig` mode handles.
 
 ### `kbsa unitig` (reference-free)
 
@@ -30,6 +34,10 @@ kbsa unitig --bulk1 bulk1_sorted --bulk2 bulk2_sorted \
   --bulk1-hist bulk1_hist.txt --bulk2-hist bulk2_hist.txt \
   --map-ref genome.fa -o output_prefix
 ```
+
+**Algorithm**: Stream-merge both KMC databases, retain k-mers with strong differential signal (`max(bulk1, bulk2) >= valley` and `total <= peak*3`), write to FASTA, run BCALM2 to compact into unitigs, score each unitig by averaging k-mer z-scores. Optional `--map-ref` aligns unitigs to reference via minimap2.
+
+**Why this complements anchor mode**: BCALM2 assembles k-mers that are *not* in the reference (novel insertions, PAV alleles, sample-specific variants). Anchor mode misses these by construction. Cabbage Bra032670 (PAV) and vradiata jg35124 (1bp deletion) both validate via unitig mode.
 
 ## Validation Results
 

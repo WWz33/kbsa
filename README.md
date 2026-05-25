@@ -59,20 +59,24 @@ Tested on 5 datasets spanning different population designs, organisms, and causa
 
 ### Unitig mode (`--map-ref`)
 
-| Dataset | Unitigs | Mapped | Target Chr % | Closest Unitig to Causal Gene | Distance | Sequence Variants Found |
-|---------|--------:|-------:|:------------:|--------------------------------|----------|--------------------------|
-| cabbage | 351 | 108 | 89/108 on C09 (82%) | Bol035718 @ C09:29.14Mb | 870 kb (closest unitig at 30.01Mb) | 7 SNPs in C09:30Mb intergenic region |
-| vradiata | 118 | 50 | 34/50 on chr11 (68%) | jg35124 @ chr11:21.27Mb | 887 kb (closest unitig at 20.38Mb) | All NM:i:0 — depth signal, no SNPs |
+| Dataset | Total Unitigs | Mapped | Top #1 Location | In Target Interval? | Unitigs in Target Interval | Best Rank in Interval |
+|---------|-------------:|-------:|-----------------|:---:|--:|:--:|
+| brapa | 3076 | 3076 | A07:8.6Mb | no | 43 (A09:37-39Mb) | #23 |
+| cucumber | 4739 | 4739 | chr2:24.0Mb | no | 62 (chr1:29-32Mb) | #19 |
+| cabbage | 351 | 108 | C09:0.8Mb | no | 12 (C09:30-30.07Mb) | #4 (unitig_4, score=513) |
+| vradiata | 118 | 50 | chr11:11.58Mb | yes (6.23-12.75Mb) | 32 (chr11:6-13Mb) | **#1** (unitig_5, score=1337) |
+| soybean | 135 | 135 | Gm04:27.9Mb | no | 32 (Gm06:17-21Mb) | #5 |
 
-**Honest read**: Unitig mode confirms that differential signal exists in the QTL region but does not directly cover the causal gene in either case. Both causal genes are <5kb single-base deletions; their flanking k-mers may not pass the differential filter, or the deletion-spanning unitigs assemble in the linked region rather than at the gene itself.
+**Honest read**: Unitig mode top-ranked unitig falls inside the literature interval only for vradiata (1/5). For the other 4 datasets, the target interval contains unitigs but they are not the highest-scored globally. This reflects the fact that unitig scoring ranks by per-unitig z-score magnitude, which can be dominated by repetitive or structural-variant regions outside the QTL interval.
 
 ### Interpretation
 
-- **Anchor mode strength**: Reliably places signal within the QTL interval at 1Mb resolution. Rank #1 for 4/5 datasets; rank #5 (still in interval) for cabbage.
-- **Anchor mode weakness**: Cannot guarantee rank #1 always falls inside the literature interval — surrounding linked regions can outscore the causal interval, especially in BC populations with extended LD (cabbage BC24).
-- **Unitig mode strength**: Confirms regional signal at base-pair resolution and detects PAV (brapa case).
-- **Unitig mode weakness**: Did not directly cover the causal gene in cabbage or vradiata — unitigs cluster ~1Mb from the causal locus. Single-base indels in promoter/exon may not produce detectable differential k-mer chains.
-- **Cabbage high-het caveat**: Heuristic peak detection fails at het>5%. External GenomeScope2 pipeline (`scripts/kbsa-anchor-gs2.sh`) corrects depth thresholds but does not change rank order.
+- **Anchor mode reliability**: 4/5 datasets (brapa, cucumber, vradiata, soybean) place rank-#1 window inside the literature interval. Cabbage's rank-#1 falls 2-3 Mb outside the interval; the literature interval is captured at rank #5.
+- **Anchor mode 1Mb resolution**: Tested window size in current results. Adjustable via `--peak-window` (default 1000000).
+- **Unitig mode coverage**: All 5 datasets produce unitigs that map inside the literature interval, but only vradiata has its globally-top-ranked unitig there (#1). For the others, top-ranked unitigs (likely repetitive or large-SV loci) come from outside the QTL — the in-interval best ranks range from #4 to #23.
+- **Unitig mode causal-gene coverage**: Cabbage and vradiata causal genes are single-base deletions; no unitig directly spans the causal mutation. Closest unitigs sit ~870-887 kb away in linked regions.
+- **High-heterozygosity caveat**: Cabbage (het=7.36%) requires GenomeScope2-derived peak override (`scripts/kbsa-anchor-gs2.sh`) to set the depth filter correctly. The override does not change the rank of the literature interval (#5).
+- **Recommended use**: Run anchor mode first to get 1Mb candidate intervals, then run unitig mode and intersect unitigs with those intervals to refine to base-pair resolution. Do not rely on unitig top-#1 alone.
 
 ## Advantages
 

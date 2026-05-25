@@ -572,7 +572,6 @@ int cmd_anchor(int argc, char** argv)
           const char* start = cseq.data() + pos;
           if (has_ambiguous(start, k)) continue;
           memcpy(t_fwd.data(), start, k);
-          t_fwd[k] = '\0';
           canonicalize(t_fwd.data(), t_canon.data(), t_rc.data(), k);
 
           uint64_t bulk1_cnt = t_bulk1_ra.query(t_canon.data());
@@ -630,10 +629,10 @@ int cmd_anchor(int argc, char** argv)
         return sa > sb;
       });
 
-    std::ofstream out(opt.output);
-    if (!out.good())
+    FILE* out = std::fopen(opt.output.c_str(), "wb");
+    if (!out)
       { fprintf(stderr, "ERROR: cannot open output: %s\n", opt.output.c_str()); return 1; }
-    out << "#chrom\tstart\tend\tn_kmers\tsum_abs_z\tmean_abs_z\tpeak_score\n";
+    std::fputs("#chrom\tstart\tend\tn_kmers\tsum_abs_z\tmean_abs_z\tpeak_score\n", out);
 
     char buf[512];
     for (const auto& [chrom, mb, sum_abs, cnt] : all_peaks) {
@@ -644,8 +643,9 @@ int cmd_anchor(int argc, char** argv)
       int n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.6f\t%.4f\n",
         chrom.c_str(), (unsigned long)start, (unsigned long)end,
         (unsigned long)cnt, sum_abs, mean_abs, score);
-      out.write(buf, n);
+      std::fwrite(buf, 1, n, out);
     }
+    std::fclose(out);
 
     auto dt = std::chrono::duration_cast<std::chrono::seconds>(
       std::chrono::steady_clock::now() - t0).count();

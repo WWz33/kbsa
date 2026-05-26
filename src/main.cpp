@@ -543,7 +543,8 @@ int cmd_anchor(int argc, char** argv)
 
     // Per-chromosome results
     struct ChromResult {
-      std::vector<std::tuple<std::string, uint64_t, double, uint64_t>> peaks;
+      // tuple: (chrom, mb, pos_excess, neg_excess, n_kmers)
+      std::vector<std::tuple<std::string, uint64_t, double, double, uint64_t>> peaks;
       uint64_t n_hits = 0;
     };
     std::vector<ChromResult> results(chroms.size());
@@ -564,7 +565,8 @@ int cmd_anchor(int argc, char** argv)
         const auto& [cname, cseq] = chroms[ci];
         const uint64_t n_pos = cseq.size() - k + 1;
         size_t n_win = cseq.size() / W + 1;
-        std::vector<double> win_sum(n_win, 0.0);
+        std::vector<double> win_pos(n_win, 0.0);  // BULK1-direction excess (z>0 in score_kmer's BULK2 convention; see below)
+        std::vector<double> win_neg(n_win, 0.0);  // BULK2-direction excess
         std::vector<uint64_t> win_cnt(n_win, 0);
         uint64_t hits = 0;
 
@@ -590,9 +592,16 @@ int cmd_anchor(int argc, char** argv)
           if (!s.passed) continue;
           ++hits;
           size_t mb = pos / W;
-          double excess = std::abs(s.z_score) - tau;
-          if (excess > 0.0)
-            win_sum[mb] += excess;
+          // Directional excess-mass: split by sign of z_score
+          // score_kmer convention: z > 0 means BULK2-enriched (kai > 0.5)
+          double z = s.z_score;
+          if (z > 0.0) {
+            double e = z - tau;
+            if (e > 0.0) win_neg[mb] += e;  // BULK2 direction
+          } else {
+            double e = -z - tau;
+            if (e > 0.0) win_pos[mb] += e;  // BULK1 direction
+          }
           win_cnt[mb] += 1;
         }
 
@@ -601,7 +610,7 @@ int cmd_anchor(int argc, char** argv)
         cr.n_hits = hits;
         for (size_t mb = 0; mb < n_win; ++mb) {
           if (win_cnt[mb] > 0)
-            cr.peaks.emplace_back(cname, mb, win_sum[mb], win_cnt[mb]);
+            cr.peaks.emplace_back(cname, mb, win_pos[mb], win_neg[mb], win_cnt[mb]);
         }
       }
 
@@ -610,7 +619,7 @@ int cmd_anchor(int argc, char** argv)
     } // end omp parallel
 
     // Merge + sort + output
-    std::vector<std::tuple<std::string, uint64_t, double, uint64_t>> all_peaks;
+    std::vector<std::tuple<std::string, uint64_t, double, double, uint64_t>> all_peaks;
     uint64_t total_hits = 0;
     for (size_t ci = 0; ci < chroms.size(); ++ci) {
       total_hits += results[ci].n_hits;
@@ -620,29 +629,38 @@ int cmd_anchor(int argc, char** argv)
         chroms[ci].first.c_str(), (unsigned long)results[ci].n_hits);
     }
 
+    // Score = max(pos, neg) — directional excess. Coherence = score / (pos + neg).
     std::sort(all_peaks.begin(), all_peaks.end(),
       [use_mean](const auto& a, const auto& b) {
-        double sa = use_mean ? std::get<2>(a) / std::max((uint64_t)1, std::get<3>(a))
-                             : std::get<2>(a);
-        double sb = use_mean ? std::get<2>(b) / std::max((uint64_t)1, std::get<3>(b))
-                             : std::get<2>(b);
+        double pa = std::get<2>(a), na = std::get<3>(a);
+        double pb = std::get<2>(b), nb = std::get<3>(b);
+        uint64_t ca = std::get<4>(a), cb = std::get<4>(b);
+        double sa = std::max(pa, na);
+        double sb = std::max(pb, nb);
+        if (use_mean) {
+          sa /= std::max((uint64_t)1, ca);
+          sb /= std::max((uint64_t)1, cb);
+        }
         return sa > sb;
       });
 
     FILE* out = std::fopen(opt.output.c_str(), "wb");
     if (!out)
       { fprintf(stderr, "ERROR: cannot open output: %s\n", opt.output.c_str()); return 1; }
-    std::fputs("#chrom\tstart\tend\tn_kmers\tsum_abs_z\tmean_abs_z\tpeak_score\n", out);
+    std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\n", out);
 
     char buf[512];
-    for (const auto& [chrom, mb, sum_abs, cnt] : all_peaks) {
-      double mean_abs = cnt > 0 ? sum_abs / cnt : 0.0;
-      double score = use_mean ? mean_abs : sum_abs;
+    for (const auto& [chrom, mb, pos_ex, neg_ex, cnt] : all_peaks) {
+      double score = std::max(pos_ex, neg_ex);
+      double total_ex = pos_ex + neg_ex;
+      double coherence = total_ex > 0.0 ? score / total_ex : 0.0;
+      const char* dir = (pos_ex >= neg_ex) ? "BULK1" : "BULK2";
+      double out_score = use_mean ? (cnt > 0 ? score / cnt : 0.0) : score;
       uint64_t start = mb * W;
       uint64_t end = start + W;
-      int n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.6f\t%.4f\n",
+      int n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\n",
         chrom.c_str(), (unsigned long)start, (unsigned long)end,
-        (unsigned long)cnt, sum_abs, mean_abs, score);
+        (unsigned long)cnt, pos_ex, neg_ex, dir, coherence, out_score);
       std::fwrite(buf, 1, n, out);
     }
     std::fclose(out);

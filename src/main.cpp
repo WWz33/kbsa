@@ -7,6 +7,10 @@
 #include <chrono>
 #include <vector>
 #include <filesystem>
+#include <random>
+#include <algorithm>
+#include <unordered_map>
+#include <omp.h>
 
 #include "kbsa_core.hpp"
 #include "kbsa_merge.hpp"
@@ -374,6 +378,8 @@ struct AnchorOptions
   bool assemble_orphans {false};
   uint32_t orphan_min_unitig {200};
   double orphan_tau {2.0};
+  uint32_t n_perm {0};         // 0 = disable permutation FDR (default)
+  uint32_t perm_block {10000}; // block size in bp for block-permutation
 };
 
 void print_anchor_usage(const char* prog)
@@ -464,6 +470,10 @@ AnchorOptions parse_anchor_args(int argc, char** argv)
       opt.override_peak1 = static_cast<uint64_t>(atoll(argv[++i]));
     else if (strcmp(argv[i], "--peak2") == 0 && i+1 < argc)
       opt.override_peak2 = static_cast<uint64_t>(atoll(argv[++i]));
+    else if (strcmp(argv[i], "--perm") == 0 && i+1 < argc)
+      opt.n_perm = static_cast<uint32_t>(atoi(argv[++i]));
+    else if (strcmp(argv[i], "--perm-block") == 0 && i+1 < argc)
+      opt.perm_block = static_cast<uint32_t>(atoi(argv[++i]));
   }
 
   if (opt.reference.empty() || opt.bulk1_db.empty() || opt.bulk2_db.empty() ||
@@ -542,12 +552,15 @@ int cmd_anchor(int argc, char** argv)
     const double tau = opt.peak_tau;
 
     // Per-chromosome results
+    struct Block { double pos_ex = 0; double neg_ex = 0; uint32_t n = 0; };
     struct ChromResult {
       // tuple: (chrom, mb, pos_excess, neg_excess, n_kmers)
       std::vector<std::tuple<std::string, uint64_t, double, double, uint64_t>> peaks;
+      std::vector<Block> blocks;
       uint64_t n_hits = 0;
     };
     std::vector<ChromResult> results(chroms.size());
+    const uint32_t B = opt.perm_block;
 
     #pragma omp parallel num_threads(opt.threads)
     {
@@ -565,9 +578,11 @@ int cmd_anchor(int argc, char** argv)
         const auto& [cname, cseq] = chroms[ci];
         const uint64_t n_pos = cseq.size() - k + 1;
         size_t n_win = cseq.size() / W + 1;
+        size_t n_blk = (opt.n_perm > 0) ? (cseq.size() / B + 1) : 0;
         std::vector<double> win_pos(n_win, 0.0);  // BULK1-direction excess (z>0 in score_kmer's BULK2 convention; see below)
         std::vector<double> win_neg(n_win, 0.0);  // BULK2-direction excess
         std::vector<uint64_t> win_cnt(n_win, 0);
+        std::vector<Block> blocks(n_blk);
         uint64_t hits = 0;
 
         for (uint64_t pos = 0; pos < n_pos; ++pos) {
@@ -595,14 +610,23 @@ int cmd_anchor(int argc, char** argv)
           // Directional excess-mass: split by sign of z_score
           // score_kmer convention: z > 0 means BULK2-enriched (kai > 0.5)
           double z = s.z_score;
+          double pos_e = 0.0, neg_e = 0.0;
           if (z > 0.0) {
             double e = z - tau;
-            if (e > 0.0) win_neg[mb] += e;  // BULK2 direction
+            if (e > 0.0) neg_e = e;  // BULK2 direction
           } else {
             double e = -z - tau;
-            if (e > 0.0) win_pos[mb] += e;  // BULK1 direction
+            if (e > 0.0) pos_e = e;  // BULK1 direction
           }
+          win_pos[mb] += pos_e;
+          win_neg[mb] += neg_e;
           win_cnt[mb] += 1;
+          if (opt.n_perm > 0) {
+            size_t bi = pos / B;
+            blocks[bi].pos_ex += pos_e;
+            blocks[bi].neg_ex += neg_e;
+            blocks[bi].n += 1;
+          }
         }
 
         // Store results
@@ -612,6 +636,7 @@ int cmd_anchor(int argc, char** argv)
           if (win_cnt[mb] > 0)
             cr.peaks.emplace_back(cname, mb, win_pos[mb], win_neg[mb], win_cnt[mb]);
         }
+        cr.blocks = std::move(blocks);
       }
 
       t_bulk1_ra.close();
@@ -619,27 +644,124 @@ int cmd_anchor(int argc, char** argv)
     } // end omp parallel
 
     // Merge + sort + output
-    std::vector<std::tuple<std::string, uint64_t, double, double, uint64_t>> all_peaks;
+    // peak: (chrom, mb, pos_excess, neg_excess, n_kmers, p_emp, q_bh)
+    struct Peak {
+      std::string chrom;
+      uint64_t mb;
+      double pos_ex, neg_ex;
+      uint64_t n;
+      double p_emp = 1.0;
+      double q_bh = 1.0;
+    };
+    std::vector<Peak> all_peaks;
     uint64_t total_hits = 0;
     for (size_t ci = 0; ci < chroms.size(); ++ci) {
       total_hits += results[ci].n_hits;
-      for (auto& p : results[ci].peaks)
-        all_peaks.push_back(std::move(p));
+      for (auto& p : results[ci].peaks) {
+        all_peaks.push_back({std::get<0>(p), std::get<1>(p),
+                             std::get<2>(p), std::get<3>(p),
+                             std::get<4>(p), 1.0, 1.0});
+      }
       fprintf(stderr, "  %s: %lu hits\n",
         chroms[ci].first.c_str(), (unsigned long)results[ci].n_hits);
     }
 
-    // Score = max(pos, neg) — directional excess. Coherence = score / (pos + neg).
+    // ---- Optional: Block-permutation FDR ----
+    // Strategy: for each chromosome, shuffle block order; recompute window scores;
+    // collect null max-window scores; compare observed window score to null distribution.
+    // Preserves overlapping-k-mer autocorrelation by keeping blocks intact.
+    if (opt.n_perm > 0) {
+      fprintf(stderr, "[kbsa anchor] Permutation FDR: %u perms, block=%u bp\n",
+              opt.n_perm, B);
+      auto t_perm0 = std::chrono::steady_clock::now();
+
+      // Compute observed window scores (max(pos, neg))
+      std::vector<double> obs_score(all_peaks.size());
+      for (size_t i = 0; i < all_peaks.size(); ++i)
+        obs_score[i] = std::max(all_peaks[i].pos_ex, all_peaks[i].neg_ex);
+
+      // Per-window count of perms where null >= observed
+      std::vector<uint64_t> ge_count(all_peaks.size(), 0);
+
+      // Index: which all_peaks indices belong to each chrom
+      std::vector<std::vector<size_t>> chrom_peaks(chroms.size());
+      std::unordered_map<std::string, size_t> chrom_idx;
+      for (size_t ci = 0; ci < chroms.size(); ++ci)
+        chrom_idx[chroms[ci].first] = ci;
+      for (size_t i = 0; i < all_peaks.size(); ++i) {
+        auto it = chrom_idx.find(all_peaks[i].chrom);
+        if (it != chrom_idx.end())
+          chrom_peaks[it->second].push_back(i);
+      }
+
+      // Block-to-window ratio: each window contains W/B blocks
+      const uint32_t blocks_per_win = W / B;
+
+      #pragma omp parallel num_threads(opt.threads)
+      {
+        std::mt19937_64 rng(42 + omp_get_thread_num());
+        std::vector<Block> shuffled;
+
+        #pragma omp for schedule(dynamic)
+        for (uint32_t perm = 0; perm < opt.n_perm; ++perm) {
+          for (size_t ci = 0; ci < chroms.size(); ++ci) {
+            const auto& src_blocks = results[ci].blocks;
+            if (src_blocks.empty()) continue;
+            shuffled = src_blocks;
+            std::shuffle(shuffled.begin(), shuffled.end(), rng);
+
+            // Recompute window scores from shuffled blocks
+            for (size_t pi : chrom_peaks[ci]) {
+              uint64_t mb = all_peaks[pi].mb;
+              size_t bi_start = mb * blocks_per_win;
+              size_t bi_end = std::min(bi_start + blocks_per_win, shuffled.size());
+              double null_pos = 0, null_neg = 0;
+              for (size_t bi = bi_start; bi < bi_end; ++bi) {
+                null_pos += shuffled[bi].pos_ex;
+                null_neg += shuffled[bi].neg_ex;
+              }
+              double null_score = std::max(null_pos, null_neg);
+              if (null_score >= obs_score[pi]) {
+                #pragma omp atomic
+                ge_count[pi] += 1;
+              }
+            }
+          }
+        }
+      }
+
+      // Empirical p = (1 + ge) / (1 + n_perm)
+      for (size_t i = 0; i < all_peaks.size(); ++i)
+        all_peaks[i].p_emp = (1.0 + ge_count[i]) / (1.0 + opt.n_perm);
+
+      // BH FDR: rank by p ascending, q_i = min(q_{i+1}, p_i * m / rank)
+      std::vector<size_t> order(all_peaks.size());
+      for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+      std::sort(order.begin(), order.end(),
+        [&](size_t a, size_t b) { return all_peaks[a].p_emp < all_peaks[b].p_emp; });
+      double m = (double)all_peaks.size();
+      double prev_q = 1.0;
+      for (ssize_t r = (ssize_t)order.size() - 1; r >= 0; --r) {
+        size_t i = order[r];
+        double q = all_peaks[i].p_emp * m / (r + 1);
+        if (q > 1.0) q = 1.0;
+        if (q < prev_q) prev_q = q;
+        all_peaks[i].q_bh = prev_q;
+      }
+
+      auto dt_perm = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - t_perm0).count();
+      fprintf(stderr, "[kbsa anchor] Permutation FDR done in %lds.\n", (long)dt_perm);
+    }
+
+    // Sort: score = max(pos, neg). Coherence = score / (pos + neg).
     std::sort(all_peaks.begin(), all_peaks.end(),
-      [use_mean](const auto& a, const auto& b) {
-        double pa = std::get<2>(a), na = std::get<3>(a);
-        double pb = std::get<2>(b), nb = std::get<3>(b);
-        uint64_t ca = std::get<4>(a), cb = std::get<4>(b);
-        double sa = std::max(pa, na);
-        double sb = std::max(pb, nb);
+      [use_mean](const Peak& a, const Peak& b) {
+        double sa = std::max(a.pos_ex, a.neg_ex);
+        double sb = std::max(b.pos_ex, b.neg_ex);
         if (use_mean) {
-          sa /= std::max((uint64_t)1, ca);
-          sb /= std::max((uint64_t)1, cb);
+          sa /= std::max((uint64_t)1, a.n);
+          sb /= std::max((uint64_t)1, b.n);
         }
         return sa > sb;
       });
@@ -647,20 +769,30 @@ int cmd_anchor(int argc, char** argv)
     FILE* out = std::fopen(opt.output.c_str(), "wb");
     if (!out)
       { fprintf(stderr, "ERROR: cannot open output: %s\n", opt.output.c_str()); return 1; }
-    std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\n", out);
+    if (opt.n_perm > 0)
+      std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\tp_emp\tq_bh\n", out);
+    else
+      std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\n", out);
 
     char buf[512];
-    for (const auto& [chrom, mb, pos_ex, neg_ex, cnt] : all_peaks) {
-      double score = std::max(pos_ex, neg_ex);
-      double total_ex = pos_ex + neg_ex;
+    for (const auto& p : all_peaks) {
+      double score = std::max(p.pos_ex, p.neg_ex);
+      double total_ex = p.pos_ex + p.neg_ex;
       double coherence = total_ex > 0.0 ? score / total_ex : 0.0;
-      const char* dir = (pos_ex >= neg_ex) ? "BULK1" : "BULK2";
-      double out_score = use_mean ? (cnt > 0 ? score / cnt : 0.0) : score;
-      uint64_t start = mb * W;
+      const char* dir = (p.pos_ex >= p.neg_ex) ? "BULK1" : "BULK2";
+      double out_score = use_mean ? (p.n > 0 ? score / p.n : 0.0) : score;
+      uint64_t start = p.mb * W;
       uint64_t end = start + W;
-      int n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\n",
-        chrom.c_str(), (unsigned long)start, (unsigned long)end,
-        (unsigned long)cnt, pos_ex, neg_ex, dir, coherence, out_score);
+      int n;
+      if (opt.n_perm > 0) {
+        n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\t%.4g\t%.4g\n",
+          p.chrom.c_str(), (unsigned long)start, (unsigned long)end,
+          (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score, p.p_emp, p.q_bh);
+      } else {
+        n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\n",
+          p.chrom.c_str(), (unsigned long)start, (unsigned long)end,
+          (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score);
+      }
       std::fwrite(buf, 1, n, out);
     }
     std::fclose(out);

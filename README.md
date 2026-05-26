@@ -59,7 +59,7 @@ Tested on 5 datasets spanning different population designs, organisms, and causa
 | Dataset | Causal Gene | Literature Interval | Top Hit (rank #1) | Coherence | p_emp | q_bh | Target Captured? |
 |---------|-------------|--------------------:|-------------------|:--------:|:-----:|:----:|:--:|
 | brapa | Bra032670 (PAV) | A09: 37.35-38.88 Mb | A09: 38-39 Mb | 0.76 | 0.001 | 0.71 | yes (40k scaffolds dilute FDR) |
-| cucumber | CsaV3_1G044640 (102bp del) | chr1: ~30 Mb (causal@30.06Mb) | chr1: 30-31 Mb | n/a | n/a | n/a | yes (run without --perm) |
+| cucumber | CsaV3_1G044640 (102bp del) | chr1: ~30 Mb (causal@30.06Mb) | chr1: 24-25 Mb | **0.97** | 0.001 | **0.033** | **REGRESSION**: target 30-31Mb drops to p=0.92 (non-significant) |
 | cabbage | Bol035718 (1bp promoter del) | C09: 28-31 Mb | C09: 33-34 Mb | 0.75 | 0.001 | **0.020** | yes at rank #5 (q=0.110) |
 | vradiata | jg35124 (1bp exon del) | chr11: 6.23-12.75 Mb | chr11: 11-12 Mb | **0.99** | 0.001 | **0.015** | yes — top 3 all q<0.05 |
 | soybean | Glyma.06G202300 (frameshift) | Gm06: 17.18-20.58 Mb | Gm06: 19-20 Mb | **0.98** | 0.001 | **0.013** | yes — top 3 all q<0.02 |
@@ -68,6 +68,7 @@ Tested on 5 datasets spanning different population designs, organisms, and causa
 - Vradiata and soybean are the cleanest cases: top-3 windows all pass FDR<0.05 with coherence ≥0.97, all in literature interval.
 - Cabbage rank-#1 (C09:33-34Mb) falls outside the 28-31Mb literature interval but has q=0.020. Target window (30-31Mb) at rank #5, q=0.110 — borderline. BC24 extended LD likely spreads signal across multiple linked windows.
 - Brapa has 40,367 scaffolds → 18,434 windows → BH-FDR is over-conservative (q≥0.71 even for clear top hits). Coherence and p_emp still flag the right region (A09:35-39Mb at #1-#4).
+- **Cucumber regression**: Directional scoring drops the target window (chr1:30-31Mb) from rank #1 (in the old |z|-tau version) to non-significant (p=0.92). The 102bp deletion creates bidirectional k-mer signal that the directional statistic penalizes. Users with large structural variants should compare results with and without `--perm` (the non-perm output still uses directional scoring but without significance filtering).
 
 **Coherence** (direction consistency, range 0.5-1.0):
 - ≥0.95 → strong directional QTL signal (vradiata, soybean)

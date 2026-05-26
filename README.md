@@ -14,18 +14,27 @@ Traditional BSA-seq requires: read alignment → variant calling → SNP-index c
 
 ### `kbsa anchor --peak` (primary)
 
-Projects k-mer scores onto reference genome positions via sliding window. Outputs ranked intervals by excess-mass score.
+Projects k-mer scores onto reference genome positions via sliding window. Outputs ranked intervals by directional excess-mass score, optionally with permutation FDR.
 
 ```bash
 kbsa anchor --ref genome.fa \
   --bulk1 bulk1_db_sorted --bulk2 bulk2_db_sorted \
   --bulk1-hist bulk1_hist.txt --bulk2-hist bulk2_hist.txt \
-  --peak --threads 6 -o output.bed
+  --peak --threads 6 --perm 1000 --perm-block 100000 \
+  -o output.bed
 ```
 
-**Algorithm**: For each k-mer on the reference (sliding by 1bp), exact-lookup its count in both bulk KMC databases via minimizer-indexed hash query. Compute the BSA z-score, accumulate `max(0, |z| - tau)` into the window the position belongs to. Rank windows by sum.
+**Algorithm**: For each k-mer on the reference (sliding by 1bp), exact-lookup its count in both bulk KMC databases via minimizer-indexed hash query. Compute the BSA z-score, split excess-mass by direction:
+- `pos_excess += max(0, -z - tau)` for BULK1-direction (kai_reg > 0.5)
+- `neg_excess += max(0, z - tau)` for BULK2-direction (kai_reg < 0.5)
+
+Window score = `max(pos_excess, neg_excess)`. Coherence = `score / (pos + neg)` measures direction consistency: real QTL → coherent (≈1.0); repeat-region noise → bidirectional (≈0.5).
 
 This is **not** alignment, mapping, or pseudo-alignment (Salmon/kallisto). The reference genome serves only as the source of probe k-mers; `KMC::CheckKmer` is an O(1) exact hash lookup. Consequence: anchor mode cannot find k-mers absent from the reference — that is what `unitig` mode handles.
+
+**Permutation FDR** (`--perm N`): Block-permutation test. Aggregate k-mers into 100kb blocks (configurable via `--perm-block`), shuffle block order within chromosome 1000+ times, recompute window scores, derive empirical p-value + Benjamini-Hochberg q-value. Block size preserves overlapping-k-mer autocorrelation while breaking genomic localization. Runtime overhead is negligible (<1s on 100k blocks).
+
+Output columns (with `--perm`): `chrom start end n_kmers pos_excess neg_excess dir coherence score p_emp q_bh`
 
 ### `kbsa unitig` (reference-free)
 
@@ -45,17 +54,25 @@ kbsa unitig --bulk1 bulk1_sorted --bulk2 bulk2_sorted \
 
 Tested on 5 datasets spanning different population designs, organisms, and causal variant types. All results below are reproducible from the public KMC databases via `kbsa anchor --peak`.
 
-### Anchor mode (`--peak`)
+### Anchor mode (`--peak`) with directional excess-mass + permutation FDR
 
-| Dataset | Causal Gene | Literature Interval | Top Hit (rank #1) | Target Interval Captured? | Top Rank Within Interval |
-|---------|-------------|--------------------:|-------------------|:--:|:--:|
-| brapa | Bra032670 (PAV) | A09: 37.35-38.88 Mb | A09: 38-39 Mb | yes | **#1** (38-39Mb in interval) |
-| cucumber | CsaV3_1G044640 (102bp del) | chr1: ~30 Mb (causal@30.06Mb) | chr1: 30-31 Mb | yes | **#1** |
-| cabbage | Bol035718 (1bp promoter del) | C09: 28-31 Mb | C09: **33-34 Mb** | yes (at rank #5) | **#5** (30-31Mb) |
-| vradiata | jg35124 (1bp exon del) | chr11: 6.23-12.75 Mb | chr11: 11-12 Mb | yes | **#1** through **#5** all in interval |
-| soybean | Glyma.06G202300 (frameshift) | Gm06: 17.18-20.58 Mb | Gm06: 19-20 Mb | yes | **#1** |
+| Dataset | Causal Gene | Literature Interval | Top Hit (rank #1) | Coherence | p_emp | q_bh | Target Captured? |
+|---------|-------------|--------------------:|-------------------|:--------:|:-----:|:----:|:--:|
+| brapa | Bra032670 (PAV) | A09: 37.35-38.88 Mb | A09: 38-39 Mb | 0.76 | 0.001 | 0.71 | yes (40k scaffolds dilute FDR) |
+| cucumber | CsaV3_1G044640 (102bp del) | chr1: ~30 Mb (causal@30.06Mb) | chr1: 30-31 Mb | n/a | n/a | n/a | yes (run without --perm) |
+| cabbage | Bol035718 (1bp promoter del) | C09: 28-31 Mb | C09: 33-34 Mb | 0.75 | 0.001 | **0.020** | yes at rank #5 (q=0.110) |
+| vradiata | jg35124 (1bp exon del) | chr11: 6.23-12.75 Mb | chr11: 11-12 Mb | **0.99** | 0.001 | **0.015** | yes — top 3 all q<0.05 |
+| soybean | Glyma.06G202300 (frameshift) | Gm06: 17.18-20.58 Mb | Gm06: 19-20 Mb | **0.98** | 0.001 | **0.013** | yes — top 3 all q<0.02 |
 
-**Honest read**: 4/5 datasets place a window inside the literature interval at rank #1. Cabbage is the exception — its top peak (C09:33-34Mb) falls ~2-3 Mb outside the literature interval; the literature interval is captured at rank #5. The 33-34Mb peak may reflect a real linked region or background noise; further investigation needed. Even with `--peak1 30 --peak2 30` (GenomeScope2-derived) the rank order does not improve.
+**Honest read**:
+- Vradiata and soybean are the cleanest cases: top-3 windows all pass FDR<0.05 with coherence ≥0.97, all in literature interval.
+- Cabbage rank-#1 (C09:33-34Mb) falls outside the 28-31Mb literature interval but has q=0.020. Target window (30-31Mb) at rank #5, q=0.110 — borderline. BC24 extended LD likely spreads signal across multiple linked windows.
+- Brapa has 40,367 scaffolds → 18,434 windows → BH-FDR is over-conservative (q≥0.71 even for clear top hits). Coherence and p_emp still flag the right region (A09:35-39Mb at #1-#4).
+
+**Coherence** (direction consistency, range 0.5-1.0):
+- ≥0.95 → strong directional QTL signal (vradiata, soybean)
+- 0.70-0.90 → real signal but with some bidirectional noise (cabbage, brapa)
+- <0.65 → likely repeat-region or artifact (e.g., cabbage C09:35-36Mb at coherence=0.57)
 
 ### Unitig mode (`--map-ref`)
 
@@ -136,9 +153,12 @@ kbsa unitig  — Reference-free differential unitig assembly
 
 | Option | Mode | Description |
 |--------|------|-------------|
-| `--peak` | anchor | Enable 1Mb sliding window ranking |
+| `--peak` | anchor | Enable sliding window ranking |
+| `--peak-window N` | anchor | Window size in bp (default: 1000000) |
 | `--peak1 N` | anchor | Override bulk1 peak depth (from GenomeScope2) |
 | `--peak2 N` | anchor | Override bulk2 peak depth |
+| `--perm N` | anchor | Block-permutation FDR with N permutations (default: 0 = off) |
+| `--perm-block N` | anchor | Block size in bp for permutation (default: 100000) |
 | `--threads N` | anchor | Parallel threads (memory: N × 1.5GB) |
 | `--map-ref` | unitig | Map assembled unitigs back to reference |
 | `--min-unitig N` | unitig | Minimum unitig length in bp (default: 200) |

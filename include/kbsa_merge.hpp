@@ -39,6 +39,7 @@ public:
         std::to_string(b2_info.kmer_length));
 
     m_kmer_len = b1_info.kmer_length;
+    m_out_buf.assign(m_kmer_len + 1, '\0');
     m_bulk1_str.assign(m_kmer_len + 1, '\0');
     m_bulk2_str.assign(m_kmer_len + 1, '\0');
     m_bulk1_kmer = CKmerAPI(m_kmer_len);
@@ -64,25 +65,30 @@ public:
     if (!m_bulk1_valid && !m_bulk2_valid) return false;
 
     if (!m_bulk2_valid) {
-      out = {m_bulk1_str.data(), m_kmer_len, m_bulk1_count, 0};
+      memcpy(m_out_buf.data(), m_bulk1_str.data(), m_kmer_len);
+      out = {m_out_buf.data(), m_kmer_len, m_bulk1_count, 0};
       advance_bulk1();
       return true;
     }
     if (!m_bulk1_valid) {
-      out = {m_bulk2_str.data(), m_kmer_len, 0, m_bulk2_count};
+      memcpy(m_out_buf.data(), m_bulk2_str.data(), m_kmer_len);
+      out = {m_out_buf.data(), m_kmer_len, 0, m_bulk2_count};
       advance_bulk2();
       return true;
     }
 
     int cmp = memcmp(m_bulk1_str.data(), m_bulk2_str.data(), m_kmer_len);
     if (cmp < 0) {
-      out = {m_bulk1_str.data(), m_kmer_len, m_bulk1_count, 0};
+      memcpy(m_out_buf.data(), m_bulk1_str.data(), m_kmer_len);
+      out = {m_out_buf.data(), m_kmer_len, m_bulk1_count, 0};
       advance_bulk1();
     } else if (cmp > 0) {
-      out = {m_bulk2_str.data(), m_kmer_len, 0, m_bulk2_count};
+      memcpy(m_out_buf.data(), m_bulk2_str.data(), m_kmer_len);
+      out = {m_out_buf.data(), m_kmer_len, 0, m_bulk2_count};
       advance_bulk2();
     } else {
-      out = {m_bulk1_str.data(), m_kmer_len, m_bulk1_count, m_bulk2_count};
+      memcpy(m_out_buf.data(), m_bulk1_str.data(), m_kmer_len);
+      out = {m_out_buf.data(), m_kmer_len, m_bulk1_count, m_bulk2_count};
       advance_bulk1();
       advance_bulk2();
     }
@@ -109,6 +115,7 @@ private:
   uint32 m_bulk1_count {0}, m_bulk2_count {0};
   bool m_bulk1_valid {false}, m_bulk2_valid {false};
   uint32_t m_kmer_len {31};
+  std::vector<char> m_out_buf;
   std::vector<char> m_bulk1_str, m_bulk2_str;
 };
 

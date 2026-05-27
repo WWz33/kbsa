@@ -507,16 +507,16 @@ struct ChromResult {
 };
 
 // Split z-score into directional excess-mass.
-// score_kmer convention: z > 0 means BULK2-enriched (kai > 0.5).
-// Returns {pos_excess (BULK1), neg_excess (BULK2)} after subtracting tau.
+// score_kmer: z > 0 = BULK1-enriched (case), z < 0 = BULK2-enriched (ctrl).
+// Returns {bulk1_excess, bulk2_excess} after subtracting tau.
 static inline std::pair<double, double> directional_excess(double z, double tau)
 {
   if (z > 0.0) {
     double e = z - tau;
-    return {0.0, e > 0.0 ? e : 0.0};
+    return {e > 0.0 ? e : 0.0, 0.0};
   }
   double e = -z - tau;
-  return {e > 0.0 ? e : 0.0, 0.0};
+  return {0.0, e > 0.0 ? e : 0.0};
 }
 
 static void apply_permutation_fdr(

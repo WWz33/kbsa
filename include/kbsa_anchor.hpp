@@ -4,6 +4,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <array>
 #include <fstream>
 #include <algorithm>
 #include <stdexcept>
@@ -37,15 +38,15 @@ struct CandidateInterval
 
 inline void reverse_complement(const char* seq, char* out, uint32_t len)
 {
+  static const auto kComplement = []() {
+    std::array<char, 256> t {};
+    t['A'] = 'T'; t['T'] = 'A'; t['C'] = 'G'; t['G'] = 'C';
+    t['a'] = 'T'; t['t'] = 'A'; t['c'] = 'G'; t['g'] = 'C';
+    return t;
+  }();
   for (uint32_t i = 0; i < len; ++i) {
-    char c = seq[len - 1 - i];
-    switch (c) {
-      case 'A': case 'a': out[i] = 'T'; break;
-      case 'T': case 't': out[i] = 'A'; break;
-      case 'C': case 'c': out[i] = 'G'; break;
-      case 'G': case 'g': out[i] = 'C'; break;
-      default: out[i] = 'N'; break;
-    }
+    char c = kComplement[static_cast<unsigned char>(seq[len - 1 - i])];
+    out[i] = c ? c : 'N';
   }
   out[len] = '\0';
 }
@@ -157,9 +158,13 @@ private:
 
 inline bool has_ambiguous(const char* seq, uint32_t len)
 {
+  static const auto kIsACGT = []() {
+    std::array<bool, 256> t {};
+    t['A'] = true; t['C'] = true; t['G'] = true; t['T'] = true;
+    return t;
+  }();
   for (uint32_t i = 0; i < len; ++i) {
-    char c = seq[i];
-    if (c != 'A' && c != 'C' && c != 'G' && c != 'T') return true;
+    if (!kIsACGT[static_cast<unsigned char>(seq[i])]) return true;
   }
   return false;
 }

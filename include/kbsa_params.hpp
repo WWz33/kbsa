@@ -69,27 +69,17 @@ inline uint64_t find_peak_depth(const std::vector<HistEntry>& hist)
 {
   if (hist.empty()) return 0;
 
-  // Find valley (local minimum) between error distribution and signal peak.
-  // Error k-mers dominate low frequencies and decay; signal k-mers rise after.
-  // Strategy: walk from freq=2 until count starts increasing → that's the valley.
-  // Then find the maximum after the valley.
-
-  // Sort by freq to ensure order
-  std::vector<HistEntry> sorted_hist = hist;
-  std::sort(sorted_hist.begin(), sorted_hist.end(),
-    [](const HistEntry& a, const HistEntry& b) { return a.freq < b.freq; });
-
   // Find first entry with freq >= 2
   size_t start = 0;
-  for (size_t i = 0; i < sorted_hist.size(); ++i) {
-    if (sorted_hist[i].freq >= 2) { start = i; break; }
+  for (size_t i = 0; i < hist.size(); ++i) {
+    if (hist[i].freq >= 2) { start = i; break; }
   }
 
   // Walk forward to find valley (first local minimum)
-  uint64_t valley_freq = sorted_hist[start].freq;
-  for (size_t i = start + 1; i < sorted_hist.size(); ++i) {
-    if (sorted_hist[i].count > sorted_hist[i - 1].count) {
-      valley_freq = sorted_hist[i - 1].freq;
+  uint64_t valley_freq = hist[start].freq;
+  for (size_t i = start + 1; i < hist.size(); ++i) {
+    if (hist[i].count > hist[i - 1].count) {
+      valley_freq = hist[i - 1].freq;
       break;
     }
   }
@@ -97,7 +87,7 @@ inline uint64_t find_peak_depth(const std::vector<HistEntry>& hist)
   // Find peak after valley
   uint64_t peak_freq = valley_freq;
   uint64_t peak_count = 0;
-  for (const auto& e : sorted_hist) {
+  for (const auto& e : hist) {
     if (e.freq > valley_freq && e.count > peak_count) {
       peak_count = e.count;
       peak_freq = e.freq;

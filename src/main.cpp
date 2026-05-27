@@ -497,7 +497,7 @@ struct Peak {
 };
 
 struct ChromResult {
-  std::vector<std::tuple<std::string, uint64_t, double, double, uint64_t>> peaks;
+  std::vector<Peak> peaks;
   std::vector<Block> blocks;
   uint64_t n_hits = 0;
 };
@@ -725,7 +725,7 @@ int cmd_anchor(int argc, char** argv)
         cr.n_hits = hits;
         for (size_t mb = 0; mb < n_win; ++mb) {
           if (win_cnt[mb] > 0)
-            cr.peaks.emplace_back(cname, mb, win_pos[mb], win_neg[mb], win_cnt[mb]);
+            cr.peaks.push_back({cname, mb, win_pos[mb], win_neg[mb], win_cnt[mb], 1.0, 1.0});
         }
         cr.blocks = std::move(blocks);
       }
@@ -739,11 +739,8 @@ int cmd_anchor(int argc, char** argv)
     uint64_t total_hits = 0;
     for (size_t ci = 0; ci < chroms.size(); ++ci) {
       total_hits += results[ci].n_hits;
-      for (auto& p : results[ci].peaks) {
-        all_peaks.push_back({std::get<0>(p), std::get<1>(p),
-                             std::get<2>(p), std::get<3>(p),
-                             std::get<4>(p), 1.0, 1.0});
-      }
+      for (auto& p : results[ci].peaks)
+        all_peaks.push_back(std::move(p));
       fprintf(stderr, "  %s: %lu hits\n",
         chroms[ci].first.c_str(), (unsigned long)results[ci].n_hits);
     }

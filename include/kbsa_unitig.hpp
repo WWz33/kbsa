@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <array>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
@@ -65,16 +66,16 @@ inline uint8_t kmer_first_base(uint64_t kmer, uint32_t k) noexcept
   return (kmer >> (2 * (k - 1))) & 3;
 }
 
-// Encode DNA char to 2-bit (A=0, C=1, G=2, T=3)
+// Encode DNA char to 2-bit (A=0, C=1, G=2, T=3). Non-ACGT → 0.
 inline uint8_t base_encode(char c) noexcept
 {
-  switch (c) {
-    case 'A': case 'a': return 0;
-    case 'C': case 'c': return 1;
-    case 'G': case 'g': return 2;
-    case 'T': case 't': return 3;
-    default: return 0;
-  }
+  static const auto kBase2 = []() {
+    std::array<uint8_t, 256> t {};
+    t['A'] = 0; t['C'] = 1; t['G'] = 2; t['T'] = 3;
+    t['a'] = 0; t['c'] = 1; t['g'] = 2; t['t'] = 3;
+    return t;
+  }();
+  return kBase2[static_cast<unsigned char>(c)];
 }
 
 inline char base_decode(uint8_t b) noexcept

@@ -199,18 +199,14 @@ struct DiffThresholds {
 inline uint64_t find_valley_depth(const std::vector<HistEntry>& hist)
 {
   if (hist.empty()) return 3;
-  std::vector<HistEntry> sorted_hist = hist;
-  std::sort(sorted_hist.begin(), sorted_hist.end(),
-    [](const HistEntry& a, const HistEntry& b) { return a.freq < b.freq; });
-
+  // hist is freq-ascending (KMC kmc_tools histogram order).
   size_t start = 0;
-  for (size_t i = 0; i < sorted_hist.size(); ++i) {
-    if (sorted_hist[i].freq >= 2) { start = i; break; }
+  for (size_t i = 0; i < hist.size(); ++i) {
+    if (hist[i].freq >= 2) { start = i; break; }
   }
-
-  for (size_t i = start + 1; i < sorted_hist.size(); ++i) {
-    if (sorted_hist[i].count > sorted_hist[i - 1].count)
-      return sorted_hist[i - 1].freq;
+  for (size_t i = start + 1; i < hist.size(); ++i) {
+    if (hist[i].count > hist[i - 1].count)
+      return hist[i - 1].freq;
   }
   return 3;
 }

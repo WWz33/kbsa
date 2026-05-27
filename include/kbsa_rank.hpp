@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -15,16 +16,17 @@ namespace kbsa {
 // Pack canonical 31-mer into uint64 (2 bits per base, 62 bits used).
 inline uint64_t pack31(const char* s) noexcept
 {
+  // 0xFF = invalid base; A=0, C=1, G=2, T=3.
+  static const auto kBase2 = []() {
+    std::array<uint8_t, 256> t {};
+    t.fill(0xFF);
+    t['A'] = 0; t['C'] = 1; t['G'] = 2; t['T'] = 3;
+    return t;
+  }();
   uint64_t x = 0;
   for (int i = 0; i < 31; ++i) {
-    uint64_t c;
-    switch (s[i]) {
-      case 'A': c = 0; break;
-      case 'C': c = 1; break;
-      case 'G': c = 2; break;
-      case 'T': c = 3; break;
-      default: return UINT64_MAX;  // sentinel for ambiguous
-    }
+    uint8_t c = kBase2[static_cast<unsigned char>(s[i])];
+    if (c == 0xFF) return UINT64_MAX;
     x = (x << 2) | c;
   }
   return x;

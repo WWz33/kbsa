@@ -640,6 +640,87 @@ static int write_peak_bed(
   return 0;
 }
 
+// Per-chromosome parallel scan: query each ref k-mer against both KMC DBs,
+// accumulate directional excess into windows + blocks. Each thread opens its
+// own KMC RA index (~1.5GB each).
+static void run_peak_scan(
+    const std::vector<std::pair<std::string, std::string>>& chroms,
+    const std::string& bulk1_db,
+    const std::string& bulk2_db,
+    const Params& params,
+    uint32_t k, uint32_t W, uint32_t B, double tau,
+    uint64_t min_total, uint64_t max_total,
+    uint32_t n_perm, int threads,
+    std::vector<ChromResult>& results)
+{
+  #pragma omp parallel num_threads(threads)
+  {
+    KmcRandomAccess t_bulk1_ra, t_bulk2_ra;
+    t_bulk1_ra.open(bulk1_db);
+    t_bulk2_ra.open(bulk2_db);
+
+    std::vector<char> t_fwd(k + 1, '\0');
+    std::vector<char> t_rc(k + 1, '\0');
+    std::vector<char> t_canon(k + 1, '\0');
+
+    #pragma omp for schedule(dynamic)
+    for (size_t ci = 0; ci < chroms.size(); ++ci) {
+      const auto& [cname, cseq] = chroms[ci];
+      const uint64_t n_pos = cseq.size() - k + 1;
+      size_t n_win = cseq.size() / W + 1;
+      size_t n_blk = (n_perm > 0) ? (cseq.size() / B + 1) : 0;
+      std::vector<double> win_pos(n_win, 0.0);
+      std::vector<double> win_neg(n_win, 0.0);
+      std::vector<uint64_t> win_cnt(n_win, 0);
+      std::vector<Block> blocks(n_blk);
+      uint64_t hits = 0;
+
+      for (uint64_t pos = 0; pos < n_pos; ++pos) {
+        const char* start = cseq.data() + pos;
+        if (has_ambiguous(start, k)) continue;
+        memcpy(t_fwd.data(), start, k);
+        canonicalize(t_fwd.data(), t_canon.data(), t_rc.data(), k);
+
+        uint64_t bulk1_cnt = t_bulk1_ra.query(t_canon.data());
+        uint64_t bulk2_cnt = t_bulk2_ra.query(t_canon.data());
+
+        uint64_t max_cnt = std::max(bulk1_cnt, bulk2_cnt);
+        uint64_t total = bulk1_cnt + bulk2_cnt;
+        if (max_cnt < min_total || total > max_total) continue;
+
+        auto s = score_kmer(bulk2_cnt, bulk1_cnt,
+                            params.bulk1_to_bulk2_scale,
+                            params.min_depth, params.max_depth,
+                            params.kai_min, params.g_min, params.error_rate);
+        if (!s.passed) continue;
+        ++hits;
+        size_t mb = pos / W;
+        auto [pos_e, neg_e] = directional_excess(s.z_score, tau);
+        win_pos[mb] += pos_e;
+        win_neg[mb] += neg_e;
+        win_cnt[mb] += 1;
+        if (n_perm > 0) {
+          size_t bi = pos / B;
+          blocks[bi].pos_ex += pos_e;
+          blocks[bi].neg_ex += neg_e;
+          blocks[bi].n += 1;
+        }
+      }
+
+      auto& cr = results[ci];
+      cr.n_hits = hits;
+      for (size_t mb = 0; mb < n_win; ++mb) {
+        if (win_cnt[mb] > 0)
+          cr.peaks.push_back({cname, mb, win_pos[mb], win_neg[mb], win_cnt[mb], 1.0, 1.0});
+      }
+      cr.blocks = std::move(blocks);
+    }
+
+    t_bulk1_ra.close();
+    t_bulk2_ra.close();
+  }
+}
+
 int cmd_anchor(int argc, char** argv)
 {
   auto opt = parse_anchor_args(argc, argv);
@@ -710,76 +791,9 @@ int cmd_anchor(int argc, char** argv)
     std::vector<ChromResult> results(chroms.size());
     const uint32_t B = opt.perm_block;
 
-    #pragma omp parallel num_threads(opt.threads)
-    {
-      // Each thread opens its own KMC db handles
-      KmcRandomAccess t_bulk1_ra, t_bulk2_ra;
-      t_bulk1_ra.open(opt.bulk1_db);
-      t_bulk2_ra.open(opt.bulk2_db);
-
-      std::vector<char> t_fwd(k + 1, '\0');
-      std::vector<char> t_rc(k + 1, '\0');
-      std::vector<char> t_canon(k + 1, '\0');
-
-      #pragma omp for schedule(dynamic)
-      for (size_t ci = 0; ci < chroms.size(); ++ci) {
-        const auto& [cname, cseq] = chroms[ci];
-        const uint64_t n_pos = cseq.size() - k + 1;
-        size_t n_win = cseq.size() / W + 1;
-        size_t n_blk = (opt.n_perm > 0) ? (cseq.size() / B + 1) : 0;
-        std::vector<double> win_pos(n_win, 0.0);  // BULK1-direction excess (z>0 in score_kmer's BULK2 convention; see below)
-        std::vector<double> win_neg(n_win, 0.0);  // BULK2-direction excess
-        std::vector<uint64_t> win_cnt(n_win, 0);
-        std::vector<Block> blocks(n_blk);
-        uint64_t hits = 0;
-
-        for (uint64_t pos = 0; pos < n_pos; ++pos) {
-          const char* start = cseq.data() + pos;
-          if (has_ambiguous(start, k)) continue;
-          memcpy(t_fwd.data(), start, k);
-          canonicalize(t_fwd.data(), t_canon.data(), t_rc.data(), k);
-
-          uint64_t bulk1_cnt = t_bulk1_ra.query(t_canon.data());
-          uint64_t bulk2_cnt = t_bulk2_ra.query(t_canon.data());
-
-          // Error/repeat filter: at least one bulk must be real (>= valley)
-          // and total must not exceed repeat threshold
-          uint64_t max_cnt = std::max(bulk1_cnt, bulk2_cnt);
-          uint64_t total = bulk1_cnt + bulk2_cnt;
-          if (max_cnt < min_total || total > max_total) continue;
-
-          auto s = score_kmer(bulk2_cnt, bulk1_cnt,
-                              params.bulk1_to_bulk2_scale,
-                              params.min_depth, params.max_depth,
-                              params.kai_min, params.g_min, params.error_rate);
-          if (!s.passed) continue;
-          ++hits;
-          size_t mb = pos / W;
-          auto [pos_e, neg_e] = directional_excess(s.z_score, tau);
-          win_pos[mb] += pos_e;
-          win_neg[mb] += neg_e;
-          win_cnt[mb] += 1;
-          if (opt.n_perm > 0) {
-            size_t bi = pos / B;
-            blocks[bi].pos_ex += pos_e;
-            blocks[bi].neg_ex += neg_e;
-            blocks[bi].n += 1;
-          }
-        }
-
-        // Store results
-        auto& cr = results[ci];
-        cr.n_hits = hits;
-        for (size_t mb = 0; mb < n_win; ++mb) {
-          if (win_cnt[mb] > 0)
-            cr.peaks.push_back({cname, mb, win_pos[mb], win_neg[mb], win_cnt[mb], 1.0, 1.0});
-        }
-        cr.blocks = std::move(blocks);
-      }
-
-      t_bulk1_ra.close();
-      t_bulk2_ra.close();
-    } // end omp parallel
+    run_peak_scan(chroms, opt.bulk1_db, opt.bulk2_db, params,
+                  k, W, B, tau, min_total, max_total,
+                  opt.n_perm, opt.threads, results);
 
     // Merge peaks from per-chromosome results
     std::vector<Peak> all_peaks;

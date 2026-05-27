@@ -350,6 +350,10 @@ int cmd_score(int argc, char** argv)
   return 0;
 }
 
+static constexpr uint64_t kRepeatPeakMultiplier = 3;
+static constexpr uint32_t kDefaultPermBlock = 100000;
+static constexpr size_t kBedRowBufSize = 512;
+
 struct AnchorOptions
 {
   std::string reference;
@@ -379,7 +383,7 @@ struct AnchorOptions
   uint32_t orphan_min_unitig {200};
   double orphan_tau {2.0};
   uint32_t n_perm {0};         // 0 = disable permutation FDR (default)
-  uint32_t perm_block {10000}; // block size in bp for block-permutation
+  uint32_t perm_block {kDefaultPermBlock};
 };
 
 void print_anchor_usage(const char* prog)
@@ -502,6 +506,19 @@ struct ChromResult {
   uint64_t n_hits = 0;
 };
 
+// Split z-score into directional excess-mass.
+// score_kmer convention: z > 0 means BULK2-enriched (kai > 0.5).
+// Returns {pos_excess (BULK1), neg_excess (BULK2)} after subtracting tau.
+static inline std::pair<double, double> directional_excess(double z, double tau)
+{
+  if (z > 0.0) {
+    double e = z - tau;
+    return {0.0, e > 0.0 ? e : 0.0};
+  }
+  double e = -z - tau;
+  return {e > 0.0 ? e : 0.0, 0.0};
+}
+
 static void apply_permutation_fdr(
     std::vector<Peak>& all_peaks,
     const std::vector<ChromResult>& results,
@@ -583,6 +600,46 @@ static void apply_permutation_fdr(
   fprintf(stderr, "[kbsa anchor] Permutation FDR done in %lds.\n", (long)dt_perm);
 }
 
+static int write_peak_bed(
+    const std::string& path,
+    const std::vector<Peak>& all_peaks,
+    uint32_t W, bool use_mean, bool with_pvals)
+{
+  FILE* out = std::fopen(path.c_str(), "wb");
+  if (!out) {
+    fprintf(stderr, "ERROR: cannot open output: %s\n", path.c_str());
+    return 1;
+  }
+  if (with_pvals)
+    std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\tp_emp\tq_bh\n", out);
+  else
+    std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\n", out);
+
+  char buf[kBedRowBufSize];
+  for (const auto& p : all_peaks) {
+    double score = std::max(p.pos_ex, p.neg_ex);
+    double total_ex = p.pos_ex + p.neg_ex;
+    double coherence = total_ex > 0.0 ? score / total_ex : 0.0;
+    const char* dir = (p.pos_ex >= p.neg_ex) ? "BULK1" : "BULK2";
+    double out_score = use_mean ? (p.n > 0 ? score / p.n : 0.0) : score;
+    uint64_t start = p.mb * W;
+    uint64_t end = start + W;
+    int n;
+    if (with_pvals) {
+      n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\t%.4g\t%.4g\n",
+        p.chrom.c_str(), (unsigned long)start, (unsigned long)end,
+        (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score, p.p_emp, p.q_bh);
+    } else {
+      n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\n",
+        p.chrom.c_str(), (unsigned long)start, (unsigned long)end,
+        (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score);
+    }
+    std::fwrite(buf, 1, n, out);
+  }
+  std::fclose(out);
+  return 0;
+}
+
 int cmd_anchor(int argc, char** argv)
 {
   auto opt = parse_anchor_args(argc, argv);
@@ -637,7 +694,7 @@ int cmd_anchor(int argc, char** argv)
     uint64_t peak1_v = opt.override_peak1 ? opt.override_peak1 : find_peak_depth(hist1_pk);
     uint64_t peak2_v = opt.override_peak2 ? opt.override_peak2 : find_peak_depth(hist2_pk);
     uint64_t min_total = std::max(valley1, valley2);
-    uint64_t max_total = std::max(peak1_v, peak2_v) * 3;
+    uint64_t max_total = std::max(peak1_v, peak2_v) * kRepeatPeakMultiplier;
     fprintf(stderr, "[kbsa anchor] Peak1=%lu%s, Peak2=%lu%s, valley1=%lu, valley2=%lu\n",
             peak1_v, opt.override_peak1 ? "(override)" : "(heuristic)",
             peak2_v, opt.override_peak2 ? "(override)" : "(heuristic)",
@@ -698,17 +755,7 @@ int cmd_anchor(int argc, char** argv)
           if (!s.passed) continue;
           ++hits;
           size_t mb = pos / W;
-          // Directional excess-mass: split by sign of z_score
-          // score_kmer convention: z > 0 means BULK2-enriched (kai > 0.5)
-          double z = s.z_score;
-          double pos_e = 0.0, neg_e = 0.0;
-          if (z > 0.0) {
-            double e = z - tau;
-            if (e > 0.0) neg_e = e;  // BULK2 direction
-          } else {
-            double e = -z - tau;
-            if (e > 0.0) pos_e = e;  // BULK1 direction
-          }
+          auto [pos_e, neg_e] = directional_excess(s.z_score, tau);
           win_pos[mb] += pos_e;
           win_neg[mb] += neg_e;
           win_cnt[mb] += 1;
@@ -761,36 +808,8 @@ int cmd_anchor(int argc, char** argv)
         return sa > sb;
       });
 
-    FILE* out = std::fopen(opt.output.c_str(), "wb");
-    if (!out)
-      { fprintf(stderr, "ERROR: cannot open output: %s\n", opt.output.c_str()); return 1; }
-    if (opt.n_perm > 0)
-      std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\tp_emp\tq_bh\n", out);
-    else
-      std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\n", out);
-
-    char buf[512];
-    for (const auto& p : all_peaks) {
-      double score = std::max(p.pos_ex, p.neg_ex);
-      double total_ex = p.pos_ex + p.neg_ex;
-      double coherence = total_ex > 0.0 ? score / total_ex : 0.0;
-      const char* dir = (p.pos_ex >= p.neg_ex) ? "BULK1" : "BULK2";
-      double out_score = use_mean ? (p.n > 0 ? score / p.n : 0.0) : score;
-      uint64_t start = p.mb * W;
-      uint64_t end = start + W;
-      int n;
-      if (opt.n_perm > 0) {
-        n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\t%.4g\t%.4g\n",
-          p.chrom.c_str(), (unsigned long)start, (unsigned long)end,
-          (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score, p.p_emp, p.q_bh);
-      } else {
-        n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\n",
-          p.chrom.c_str(), (unsigned long)start, (unsigned long)end,
-          (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score);
-      }
-      std::fwrite(buf, 1, n, out);
-    }
-    std::fclose(out);
+    if (write_peak_bed(opt.output, all_peaks, W, use_mean, opt.n_perm > 0) != 0)
+      return 1;
 
     auto dt = std::chrono::duration_cast<std::chrono::seconds>(
       std::chrono::steady_clock::now() - t0).count();

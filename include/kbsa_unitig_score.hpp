@@ -43,7 +43,10 @@ inline UnitigScore score_unitig(const std::string& seq, uint32_t k,
   uint64_t total_b1 = 0, total_b2 = 0;
 
   for (size_t i = 0; i + k <= seq.size(); ++i) {
-    uint64_t fwd = string_to_kmer(seq.substr(i, k));
+    // Compute canonical k-mer directly from char* (no substr allocation).
+    uint64_t fwd = 0;
+    for (uint32_t j = 0; j < k; ++j)
+      fwd = (fwd << 2) | base_encode(seq[i + j]);
     uint64_t can = kmer_canonical(fwd, k);
 
     auto it = kmers.find(can);

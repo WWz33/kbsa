@@ -7,19 +7,20 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <array>
 
 static void revcomp(const char* seq, size_t len, std::string& out)
 {
+    static const auto kComp = []() {
+        std::array<char, 256> t {};
+        t['A'] = 'T'; t['T'] = 'A'; t['C'] = 'G'; t['G'] = 'C';
+        t['a'] = 'T'; t['t'] = 'A'; t['c'] = 'G'; t['g'] = 'C';
+        return t;
+    }();
     out.resize(len);
     for (size_t i = 0; i < len; ++i) {
-        char c = seq[len - 1 - i];
-        switch (c) {
-            case 'A': case 'a': out[i] = 'T'; break;
-            case 'T': case 't': out[i] = 'A'; break;
-            case 'C': case 'c': out[i] = 'G'; break;
-            case 'G': case 'g': out[i] = 'C'; break;
-            default: out[i] = 'N'; break;
-        }
+        char c = kComp[static_cast<unsigned char>(seq[len - 1 - i])];
+        out[i] = c ? c : 'N';
     }
 }
 

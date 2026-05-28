@@ -19,7 +19,6 @@
 #include "kbsa_rank.hpp"
 #include "kbsa_unitig.hpp"
 #include "kbsa_unitig_score.hpp"
-#include "kbsa_unitig_map.hpp"
 #include "kmc_runner.h"
 
 namespace fs = std::filesystem;

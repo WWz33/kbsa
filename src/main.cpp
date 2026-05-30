@@ -641,9 +641,9 @@ static int write_peak_bed(
     return 1;
   }
   if (with_pvals)
-    std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\tp_emp\tq_bh\n", out);
+    std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\tscore_bidir\tp_emp\tq_bh\n", out);
   else
-    std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\n", out);
+    std::fputs("#chrom\tstart\tend\tn_kmers\tpos_excess\tneg_excess\tdir\tcoherence\tscore\tscore_bidir\n", out);
 
   char buf[kBedRowBufSize];
   for (const auto& p : all_peaks) {
@@ -652,17 +652,23 @@ static int write_peak_bed(
     double coherence = total_ex > 0.0 ? score / total_ex : 0.0;
     const char* dir = (p.pos_ex >= p.neg_ex) ? "BULK1" : "BULK2";
     double out_score = use_mean ? (p.n > 0 ? score / p.n : 0.0) : score;
+    // score_bidir = pos + neg: sums both directions. Equivalent to the old
+    // sum|z| statistic. Preferred for large structural variants (deletions,
+    // PAV) whose junction k-mers create legitimate bidirectional signal that
+    // the dominant-direction score penalizes. score (max) suits SNP-linked
+    // QTL where linked markers share direction.
+    double score_bidir = use_mean ? (p.n > 0 ? total_ex / p.n : 0.0) : total_ex;
     uint64_t start = p.mb * W;
     uint64_t end = start + W;
     int n;
     if (with_pvals) {
-      n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\t%.4g\t%.4g\n",
+      n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\t%.4f\t%.4g\t%.4g\n",
         p.chrom.c_str(), (unsigned long)start, (unsigned long)end,
-        (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score, p.p_emp, p.q_bh);
+        (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score, score_bidir, p.p_emp, p.q_bh);
     } else {
-      n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\n",
+      n = snprintf(buf, sizeof(buf), "%s\t%lu\t%lu\t%lu\t%.4f\t%.4f\t%s\t%.4f\t%.4f\t%.4f\n",
         p.chrom.c_str(), (unsigned long)start, (unsigned long)end,
-        (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score);
+        (unsigned long)p.n, p.pos_ex, p.neg_ex, dir, coherence, out_score, score_bidir);
     }
     std::fwrite(buf, 1, n, out);
   }

@@ -518,13 +518,28 @@ static inline std::pair<double, double> directional_excess(double z, double tau)
   return {0.0, e > 0.0 ? e : 0.0};
 }
 
+// SplitMix64 finalizer — strong avalanche, used to derive well-separated
+// per-(perm, chrom) seeds. Naive XOR of nearby integers would feed MT19937
+// near-identical seeds, producing correlated early output (a known MT defect)
+// and biasing the permutation null. SplitMix64 mixes them to independence.
+static inline uint64_t splitmix64(uint64_t x) noexcept
+{
+  x += 0x9E3779B97F4A7C15ull;
+  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+  x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+  return x ^ (x >> 31);
+}
+
+static constexpr uint64_t kPermSeedBase = 0x6B7A5F4B5341ull;  // "kBSA" salt
+
 static void apply_permutation_fdr(
     std::vector<Peak>& all_peaks,
     const std::vector<ChromResult>& results,
     const std::vector<std::pair<std::string, std::string>>& chroms,
     uint32_t n_perm, uint32_t W, uint32_t B, int threads)
 {
-  fprintf(stderr, "[kbsa anchor] Permutation FDR: %u perms, block=%u bp\n", n_perm, B);
+  fprintf(stderr, "[kbsa anchor] Permutation FDR: %u perms, block=%u bp (seed=0x%llx)\n",
+          n_perm, B, (unsigned long long)kPermSeedBase);
   auto t_perm0 = std::chrono::steady_clock::now();
 
   std::vector<double> obs_score(all_peaks.size());
@@ -543,11 +558,21 @@ static void apply_permutation_fdr(
       chrom_peaks[it->second].push_back(i);
   }
 
+  // Each window spans W/B blocks. floor() here would silently misalign the
+  // window↔block mapping when W is not a multiple of B; guard against it.
+  if (W % B != 0) {
+    fprintf(stderr,
+      "ERROR: --peak-window (%u) must be a multiple of --perm-block (%u) "
+      "for permutation FDR.\n", W, B);
+    std::exit(1);
+  }
   const uint32_t blocks_per_win = W / B;
 
+  // Parallelize over permutations, but seed each (perm, chrom) shuffle
+  // deterministically from (perm, chrom) — NOT from thread id. This makes
+  // p-values invariant to thread count and OMP scheduling.
   #pragma omp parallel num_threads(threads)
   {
-    std::mt19937_64 rng(42 + omp_get_thread_num());
     std::vector<Block> shuffled;
 
     #pragma omp for schedule(dynamic)
@@ -555,6 +580,12 @@ static void apply_permutation_fdr(
       for (size_t ci = 0; ci < chroms.size(); ++ci) {
         const auto& src_blocks = results[ci].blocks;
         if (src_blocks.empty()) continue;
+
+        uint64_t seed = splitmix64(kPermSeedBase
+                                   ^ (uint64_t(perm) * 0x9E3779B97F4A7C15ull)
+                                   ^ (uint64_t(ci)   * 0xD1B54A32D192ED03ull));
+        std::mt19937_64 rng(seed);
+
         shuffled = src_blocks;
         std::shuffle(shuffled.begin(), shuffled.end(), rng);
 
